@@ -1,0 +1,21 @@
+clasm TODO List
+
+See also https://github.com/hugoduncan/clasm/issues
+
+* For 0.2.0
+The aim is to simplify usage.
+  - [ ] Add syntax sugar to avoid the `add` macro
+
+* For 0.1.0
+The aim is to make this minimally useful.
+  - [ ] Add conversion of constant labels to pool indices
+  - [ ] Add conversion of labels to code indices
+  - [ ] Add code indices
+  - [ ] Add post processing of constants to build constant pool
+  - [ ] Add try..catch synthetic ops to build exception tables
+  - [ ] Add post processing of synthetic ops
+  - [ ] Allow the specification of a value to create it's containing attribute
+
+* classfile writer
+Add a classfile writer, that writes out the classdata structure onto
+a class file.
