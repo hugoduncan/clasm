@@ -1,32 +1,7 @@
 (ns clasm.classdata
   "A JVM classfile representation builder.
 Creates a data structure with all the classfile details."
-  (:refer-clojure :exclude [class pop])
-  (:use
-   [clojure.algo.monads :only [state-m domonad]]))
-
-;;; # Modadic forms
-(def asm-m state-m)
-
-(defmacro let-asm
-  "A monadic comprehension using the clasm-m monad."
-  [& body]
-  `(domonad asm-m ~@body))
-
-(defmacro chain-asm
-  "Defines a monadic comprehension under the asm-m monad, where return value
-  bindings not specified. Any vector in the arguments is expected to be of the
-  form [symbol expr] and becomes part of the generated monad comprehension."
-  [& args]
-  (letfn [(gen-step [f]
-            (if (vector? f)
-              f
-              [(gensym "_") (if (keyword? f) `(label ~f) f)]))]
-    (let [bindings (mapcat gen-step args)]
-      `(let-asm
-         [~@bindings]
-         ~(last (drop-last bindings))))))
-
+  (:refer-clojure :exclude [class pop]))
 
 ;;; # Components
 ;;; A component is a class, field, method, constant or an attribute. These
@@ -48,93 +23,65 @@ Creates a data structure with all the classfile details."
   [component]
   (-> component meta ::parent-scopes))
 
-;;; ## Component stack
-;;; When building the classfile representation, we represent incomplete
-;;; components on a component stack.
-(defn start-component*
-  [classdata component]
-  (->
-   classdata
-   (update-in [:components] conj component)))
+(defn report-unattached
+  [components]
+  (throw (ex-info
+          (str "Could not attach components.")
+          {:components components})))
 
-(defn start-component
-  [component]
-  (fn [classdata]
-    [nil (start-component* classdata component)]))
-
-(defn ^:internal last-component [classdata]
-  [(peek (:components classdata))
-   (update-in classdata [:components] clojure.core/pop)])
-
-(defn ^:internal last-component-with-scope
-  "Return and pop the top of the component stack."
-  [classdata]
-  [(peek (:components classdata))
-   (-> classdata
-       (update-in [:components] clojure.core/pop))])
-
-(defn add-component
+(defn ^:internal add-component
   "Add a component to the first component in the stack which is in the set of
 possible scopes and which has the specified collection."
-  [classdata possible-scopes collection component]
-  (loop [[top cd] (last-component-with-scope classdata)
-         popped-components '()]
-    (if (and (contains? top collection) (possible-scopes (::scope (meta top))))
-      (reduce
-       (fn add-component-reducer [cd component] (start-component* cd component))
-       (start-component* cd (update-in top [collection] conj component))
-       popped-components)
-      (if (peek (:components cd))
-        (recur
-         (last-component-with-scope cd)
-         (conj popped-components top))
-        (throw (ex-info
-                (str "Could not find component with " collection
-                     " and scope in " possible-scopes
-                     " to attach component.")
-                {:component component
-                 :collection collection
-                 :possible-scopes possible-scopes
-                 :classdata classdata
-                 :metadata (vec (map meta (:components classdata)))}))))))
+  [top possible-scopes collection component]
+  (if (and (contains? top collection) (possible-scopes (component-scope top)))
+    [(update-in top [collection] conj component) nil]
+    [top component]))
 
-(defn finish-component
-  [classdata]
-  (let [[component classdata] (last-component-with-scope classdata)
-        mc (meta component)]
-    [nil (->
-          classdata
-          (add-component (::parent-scopes mc) (::collection mc) component))]))
+(declare label)
+
+(defn add*
+  [parent components]
+  (let [[new-parent others]
+        (reduce
+         (fn add-compish [[p pass-ups] c]
+           (cond
+             (vector? c) (let [[new-p & comps] (add* p c)]
+                           [new-p (vec (concat pass-ups comps))])
+             (keyword? c) (add-compish [p pass-ups] (label c))
+             (nil? c) [p pass-ups]
+             (map? c) (let [[p pass-up]
+                            (add-component
+                             p
+                             (component-parent-scopes c)
+                             (component-collection c)
+                             c)]
+                        [p (conj pass-ups pass-up)])
+             :else (throw (ex-info (str "Invalid component" c)
+                                   {:component c}))))
+         [parent []]
+         components)]
+    (vec (concat [new-parent] others))))
+
 
 ;;; ## Adding Components and Attribute Values
 (defmacro add
   "Add a component. Fields, methods, attributes are all components."
   {:indent 1}
   [component & body]
-  `(let [c# ~component]
-     (chain-asm
-      (start-component c#)
-      ~@body
-      finish-component)))
+  `(add* ~component [~@body]))
 
 (defmacro defstructure
   "Define a function, that adds a structure to a parent component."
   [struct-name collection parent-scopes fields]
   `(defn ~struct-name
      [~@fields]
-     (fn [classdata#]
-       (letfn [(make-struct# [~@fields]
-                 (with-meta
-                   (zipmap
-                    ~(vec (map (comp keyword name) fields))
-                    ~(vec fields))
-                   {::scope ~(keyword (name struct-name))
-                    ::collection ~collection
-                    ::parent-scopes ~parent-scopes}))
-               (add-struct# [classdata# struct#]
-                 (add-component
-                  classdata# ~parent-scopes ~collection struct#))]
-         [nil (add-struct# classdata# (make-struct# ~@fields))]))))
+     (with-meta
+       (zipmap
+        ~(vec (map (comp keyword name) fields))
+        ~(vec fields))
+       {::scope ~(keyword (name struct-name))
+        ::collection ~collection
+        ::parent-scopes ~parent-scopes})))
 
 (defmacro defvalue
   "Define a function, that adds a value generated by value-fn to a parent
@@ -143,11 +90,11 @@ possible scopes and which has the specified collection."
   `(defn ~value-name
      {:arglists '[[~@fields]]}
      [& [~@fields :as args#]]
-     (fn [classdata#]
-       (letfn [(add-value# [classdata# value#]
-                 (add-component
-                  classdata# ~parent-scopes ~collection value#))]
-         [nil (add-value# classdata# (apply ~value-f args#))]))))
+     (with-meta
+       (apply ~value-f args#)
+       {::scope ~(keyword (name value-name))
+        ::collection ~collection
+        ::parent-scopes ~parent-scopes})))
 
 
 ;;; # Class
@@ -177,16 +124,15 @@ possible scopes and which has the specified collection."
 (defmacro edit
   "Modify a classdata definition of a class"
   [classdata & body]
-  `(-> ((chain-asm ~@(or body [(fn [c] [nil c])]))
-        {:scope [:class] :components [~classdata]})
-       second
-       :components
-       peek))
+  `(let [[c# others#] (add ~classdata ~@body)]
+     (when others#
+       (report-unattached others#))
+     c#))
 
 
 ;;; # Constant pool
-(defn make-constant
-  [label tag values]
+(defn constant
+  [label tag & values]
   ^{:type ::constant
     ::scope :constant
     ::collection :constant-pool
@@ -194,16 +140,6 @@ possible scopes and which has the specified collection."
   {:label label
    :tag tag
    :values values})
-
-(defn add-constant
-  [classdata op]
-  (add-component classdata #{:class} :constant-pool op))
-
-(defn constant
-  [label tag & values]
-  (fn [classdata]
-    [nil (add-constant classdata (make-constant label tag values))]))
-
 
 ;;; # Methods
 (defn error-check-method
@@ -302,7 +238,6 @@ possible scopes and which has the specified collection."
 
 (generate-attribute-functions)
 
-
 (defstructure line-number :line_number_table #{:line-number-table}
   [start_pc line_number])
 
@@ -348,7 +283,7 @@ possible scopes and which has the specified collection."
 
 (defvalue smap :debug_extensions #{:source-debug-extension}
   [source-file default-stratum stratums & [{:keys [vendor-id vendor-content]}]]
-  smap-string)
+  (comp #(hash-map :smap %) smap-string))
 
 
 
@@ -674,14 +609,13 @@ possible scopes and which has the specified collection."
 
 (defn make-op
   [opcode mnemonic args]
-  ^{:type ::op}
+  ^{:type ::op
+    ::scope ::opcode
+    ::parent-scopes #{:code}
+    ::collection :code}
   {:opcode opcode
    :mnemonic mnemonic
    :args args})
-
-(defn add-op
-  [classdata op]
-  (add-component classdata #{:code} :code op))
 
 (defn generate-opcode-function
   "Generate an opcode function"
@@ -689,9 +623,7 @@ possible scopes and which has the specified collection."
     asm-args]]
   (let [arg-names (map (comp symbol name) (or asm-args args))]
     `(defn ~(symbol (name mnemonic)) [~@arg-names]
-       (fn ~(symbol (name mnemonic)) [classdata#]
-         [nil (add-op classdata#
-                      (make-op ~opcode ~mnemonic ~(vec arg-names)))]))))
+       (make-op ~opcode ~mnemonic ~(vec arg-names)))))
 
 (defmacro generate-opcode-functions
   "Generate a function for each opcode."
@@ -705,5 +637,4 @@ possible scopes and which has the specified collection."
 ;;; ## Psuedo ops
 
 (defn label [label-kw]
-  (fn [classdata]
-    [nil (add-op classdata (make-op :label :label [label-kw]))]))
+  (make-op :label :label [label-kw]))

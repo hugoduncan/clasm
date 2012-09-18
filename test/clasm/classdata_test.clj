@@ -58,7 +58,6 @@
           :attributes []}
          (edit (class myClass)
            (add (method int myMethod [])))))
-
   (is (= {:name 'myClass
           :methods [{:name 'myMethod
                      :args []
@@ -267,9 +266,10 @@
                         :args [],
                         :attributes []
                         :debug_extensions
-                        [(str
-                          "SMAP\nfred.java\nClojure\n*S Clojure\n*F\n+ 1 fred\n"
-                          "some/path/fred\n*L\n10:20\n*E")]}]}
+                        [{:smap
+                          (str
+                           "SMAP\nfred.java\nClojure\n*S Clojure\n*F\n"
+                           "+ 1 fred\nsome/path/fred\n*L\n10:20\n*E")}]}]}
          (edit (class LineNumTest)
            (add (method void withLineNums [])
              (add (source-debug-extension)
@@ -300,7 +300,9 @@
           :constant-pool []
           :attributes
           [{:debug_extensions
-            ["SMAP\nfred.java\nClojure\n*S Clojure\n*F\n+ 1 fred\nsome/path/fred\n*L\n10:20\n*E"]
+            [{:smap
+              (str "SMAP\nfred.java\nClojure\n*S Clojure\n*F\n+ 1 fred\n"
+                   "some/path/fred\n*L\n10:20\n*E")}]
             :name :source-debug-extension
             :args []
             :attributes []}]}
